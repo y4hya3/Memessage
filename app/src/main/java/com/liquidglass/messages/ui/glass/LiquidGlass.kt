@@ -66,7 +66,7 @@ import kotlin.math.roundToInt
  */
 @Stable
 class Backdrop internal constructor(
-    internal val layer: GraphicsLayer,
+    internal val layer: GraphicsLayer?,
     internal val enabled: Boolean = true,
     internal val lowRam: Boolean = false,
 ) {
@@ -79,10 +79,10 @@ class Backdrop internal constructor(
 fun rememberBackdrop(): Backdrop {
     val view = LocalView.current
     val context = LocalContext.current
-    val layer = rememberGraphicsLayer()
     val enabled = remember(view.isInEditMode) {
         !view.isInEditMode && DevicePerformance.supportsBackdropGlass()
     }
+    val layer = if (enabled) rememberGraphicsLayer() else null
     val lowRam = remember(view.isInEditMode, context) {
         !view.isInEditMode && DevicePerformance.isLowRam(context)
     }
@@ -94,7 +94,8 @@ val LocalBackdrop = staticCompositionLocalOf<Backdrop?> { null }
 
 /** Records this node's drawing into [backdrop] (and still draws it normally). */
 fun Modifier.backdropSource(backdrop: Backdrop): Modifier {
-    if (!backdrop.enabled) return this
+    val layer = backdrop.layer
+    if (!backdrop.enabled || layer == null) return this
     return this
         .onGloballyPositioned { backdrop.origin = it.positionInRoot() }
         .drawWithContent {
@@ -104,8 +105,8 @@ fun Modifier.backdropSource(backdrop: Backdrop): Modifier {
                 drawContent()
                 return@drawWithContent
             }
-            backdrop.layer.record { this@drawWithContent.drawContent() }
-            drawLayer(backdrop.layer)
+            layer.record { this@drawWithContent.drawContent() }
+            drawLayer(layer)
             if (!backdrop.recorded) backdrop.recorded = true
         }
 }
@@ -158,7 +159,11 @@ fun Modifier.liquidGlass(
     val backdrop = LocalBackdrop.current
     val context = LocalContext.current
     val colors = LiquidTheme.colors
-    val glassLayer = rememberGraphicsLayer()
+    val glassLayer = if (backdrop != null && backdrop.enabled && Build.VERSION.SDK_INT >= 31) {
+        rememberGraphicsLayer()
+    } else {
+        null
+    }
     val drawCache = remember { GlassDrawCache() }
     var position by remember { mutableStateOf(Offset.Zero) }
     val useLens = remember(context, backdrop?.lowRam) {
@@ -213,6 +218,7 @@ fun Modifier.liquidGlass(
             val outline = drawCache.outline!!
             val path = drawCache.path!!
             val canRefract = backdrop != null && backdrop.enabled && backdrop.recorded &&
+                backdrop.layer != null && glassLayer != null &&
                 Build.VERSION.SDK_INT >= 31 &&
                 drawContext.canvas.nativeCanvas.isHardwareAccelerated
 
@@ -230,7 +236,7 @@ fun Modifier.liquidGlass(
                 }
                 drawRefractedBackdrop(
                     backdrop = backdrop!!,
-                    glassLayer = glassLayer,
+                    glassLayer = glassLayer!!,
                     clip = path,
                     position = position,
                     margin = drawCache.margin,
@@ -266,6 +272,7 @@ private fun DrawScope.drawRefractedBackdrop(
     val h = size.height.roundToInt() + margin * 2
     if (w <= 0 || h <= 0) return
 
+    val sourceLayer = backdrop.layer ?: return
     glassLayer.topLeft = IntOffset(-margin, -margin)
     if (glassLayer.renderEffect != renderEffect) glassLayer.renderEffect = renderEffect
     if (glassLayer.colorFilter != vibrancyFilter) glassLayer.colorFilter = vibrancyFilter
@@ -274,7 +281,7 @@ private fun DrawScope.drawRefractedBackdrop(
             left = backdrop.origin.x - position.x + margin,
             top = backdrop.origin.y - position.y + margin,
         ) {
-            drawLayer(backdrop.layer)
+            drawLayer(sourceLayer)
         }
     }
     clipPath(clip) { drawLayer(glassLayer) }

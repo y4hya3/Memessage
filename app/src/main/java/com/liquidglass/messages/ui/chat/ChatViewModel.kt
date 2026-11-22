@@ -28,6 +28,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -139,13 +140,14 @@ class ChatViewModel(
         }
         // Resolve the contact for the header.
         viewModelScope.launch {
-            val contact = repository.resolveContact(address)
+            val contact = runCatching { repository.resolveContact(address) }
+                .getOrElse { Contact(number = address) }
             _uiState.update { it.copy(contact = contact) }
         }
         // Resolve the thread id if needed, then stream messages and mark read.
         viewModelScope.launch {
             if (this@ChatViewModel.threadId <= 0L) {
-                val resolved = repository.getOrCreateThreadId(address)
+                val resolved = runCatching { repository.getOrCreateThreadId(address) }.getOrDefault(-1L)
                 this@ChatViewModel.threadId = resolved
                 if (resolved > 0L) {
                     val current = _inputText.value
@@ -162,17 +164,19 @@ class ChatViewModel(
                 }
             }
             markThreadRead()
-            loadParticipants()
-            repository.observeMessages(this@ChatViewModel.threadId).collect { messages ->
-                // Dual-SIM: route replies AND reaction syncs over the SIM this
-                // conversation actually uses (the incoming SIM, else any known one).
-                val sub = messages.lastOrNull { !it.isOutgoing && it.subscriptionId >= 0 }?.subscriptionId
-                    ?: messages.lastOrNull { it.subscriptionId >= 0 }?.subscriptionId
-                    ?: -1
-                _uiState.update { it.copy(messages = messages, subscriptionId = sub) }
-                // A message that arrives while the chat is open is read already.
-                if (visible && messages.any { !it.isOutgoing && !it.read }) markThreadRead()
-            }
+            runCatching { loadParticipants() }
+            repository.observeMessages(this@ChatViewModel.threadId)
+                .catch { emit(emptyList()) }
+                .collect { messages ->
+                    // Dual-SIM: route replies AND reaction syncs over the SIM this
+                    // conversation actually uses (the incoming SIM, else any known one).
+                    val sub = messages.lastOrNull { !it.isOutgoing && it.subscriptionId >= 0 }?.subscriptionId
+                        ?: messages.lastOrNull { it.subscriptionId >= 0 }?.subscriptionId
+                        ?: -1
+                    _uiState.update { it.copy(messages = messages, subscriptionId = sub) }
+                    // A message that arrives while the chat is open is read already.
+                    if (visible && messages.any { !it.isOutgoing && !it.read }) markThreadRead()
+                }
         }
     }
 

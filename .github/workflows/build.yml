@@ -101,4 +101,3 @@ jobs:
           make_latest: true
           files: |
             release-apks/LiquidMessages-v${{ steps.version.outputs.name }}.apk
-            release-apks/LiquidMessages-v${{ steps.version.outputs.name }}-debug.apk

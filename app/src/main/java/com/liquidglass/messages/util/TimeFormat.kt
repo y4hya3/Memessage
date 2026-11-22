@@ -13,16 +13,19 @@ object TimeFormat {
 
     /** Compact stamp for the conversation list row (e.g. "9:41 AM", "Yesterday", "Mon", "5/14/24"). */
     fun conversationStamp(context: Context, millis: Long): String {
-        val now = Calendar.getInstance()
-        val then = Calendar.getInstance().apply { timeInMillis = millis }
+        if (millis <= 0L) return ""
+        return runCatching {
+            val now = Calendar.getInstance()
+            val then = Calendar.getInstance().apply { timeInMillis = millis }
 
-        return when {
-            isSameDay(now, then) -> timeOnly(context, millis)
-            isYesterday(now, then) -> "Yesterday"
-            withinDays(now, then, 7) -> dayOfWeek(millis)
-            isSameYear(now, then) -> shortDate(context, millis)
-            else -> shortDateWithYear(context, millis)
-        }
+            when {
+                isSameDay(now, then) -> timeOnly(context, millis)
+                isYesterday(now, then) -> "Yesterday"
+                withinDays(now, then, 7) -> dayOfWeek(millis)
+                isSameYear(now, then) -> shortDate(context, millis)
+                else -> shortDateWithYear(context, millis)
+            }
+        }.getOrDefault("")
     }
 
     /** Full separator label shown between message groups (e.g. "Today 9:41 AM"). */

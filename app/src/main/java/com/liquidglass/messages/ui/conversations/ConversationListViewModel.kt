@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
@@ -62,14 +63,17 @@ class ConversationListViewModel(
      */
     val uiState: StateFlow<ConversationListUiState> =
         combine(
-            repository.observeConversations(),
+            repository.observeConversations()
+                .catch { emit(repository.cachedConversations().orEmpty()) },
             draftStore?.state ?: flowOf(DraftStore.State()),
             _searchQuery
         ) { conversations, draftState, query ->
-            val withDrafts = conversations.map { c ->
-                val draft = draftState.draftFor(c.threadId, c.address, c.isGroup)?.text
-                if (draft != c.draftText) c.copy(draftText = draft) else c
-            }
+            val withDrafts = conversations
+                .distinctBy { it.threadId }
+                .map { c ->
+                    val draft = draftState.draftFor(c.threadId, c.address, c.isGroup)?.text
+                    if (draft != c.draftText) c.copy(draftText = draft) else c
+                }
             val trimmed = query.trim()
             val filtered = if (trimmed.isBlank()) {
                 withDrafts

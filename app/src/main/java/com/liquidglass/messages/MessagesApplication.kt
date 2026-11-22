@@ -7,6 +7,10 @@ import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.liquidglass.messages.di.ServiceLocator
 import com.liquidglass.messages.util.DevicePerformance
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * App entry point. Builds the [ServiceLocator], tunes Coil's image caches
@@ -21,13 +25,17 @@ class MessagesApplication : Application(), ImageLoaderFactory {
     lateinit var container: ServiceLocator
         private set
 
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate() {
         super.onCreate()
         com.liquidglass.messages.data.mms.MmsLog.init(this)
         container = ServiceLocator(this)
-        container.notificationHelper.createChannels()
-        // Alarms can be lost (force-stop, some OEM task killers); re-arm Send Later.
-        container.scheduledMessages.rescheduleAll()
+        appScope.launch {
+            runCatching { container.notificationHelper.createChannels() }
+            // Alarms can be lost (force-stop, some OEM task killers); re-arm Send Later.
+            runCatching { container.scheduledMessages.rescheduleAll() }
+        }
     }
 
     override fun newImageLoader(): ImageLoader {

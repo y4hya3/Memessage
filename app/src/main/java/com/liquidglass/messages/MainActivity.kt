@@ -87,8 +87,12 @@ class MainActivity : ComponentActivity() {
 
     /** Requests the runtime permissions; refreshes state on return. */
     private val permissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
             refreshGates()
+            if (results[android.Manifest.permission.READ_CONTACTS] == true) {
+                appContainer.contactsHelper.clearCache()
+                appContainer.smsRepository.notifyDataChanged()
+            }
             permissionsBlocked = !hasPermissions &&
                 PermissionManager.requiredPermanentlyDenied(this)
         }
@@ -178,10 +182,12 @@ class MainActivity : ComponentActivity() {
     private fun pruneOldMessages() {
         lifecycleScope.launch(Dispatchers.IO) {
             delay(800)
-            appContainer.smsRepository.purgeExpired()
-            val days = appContainer.appSettings.keepMessages.value.days ?: return@launch
-            val cutoff = System.currentTimeMillis() - days * 86_400_000L
-            appContainer.smsRepository.deleteOlderThan(cutoff)
+            runCatching {
+                appContainer.smsRepository.purgeExpired()
+                val days = appContainer.appSettings.keepMessages.value.days ?: return@runCatching
+                val cutoff = System.currentTimeMillis() - days * 86_400_000L
+                appContainer.smsRepository.deleteOlderThan(cutoff)
+            }
         }
     }
 
@@ -220,7 +226,9 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (askOptional) prefs.edit().putBoolean(KEY_ASKED_OPTIONAL, true).apply()
-        permissionLauncher.launch(toAsk.toTypedArray())
+        runCatching { permissionLauncher.launch(toAsk.toTypedArray()) }.onFailure {
+            Log.w(TAG, "Could not start the permission request", it)
+        }
     }
 
     /**

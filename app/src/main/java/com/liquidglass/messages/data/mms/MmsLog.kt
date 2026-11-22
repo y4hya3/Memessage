@@ -20,16 +20,26 @@ object MmsLog {
     private const val MAX_BYTES = 256 * 1024
     private val time = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
 
+    @Volatile private var appContext: Context? = null
     @Volatile private var file: File? = null
 
     fun init(context: Context) {
-        if (file != null) return
-        file = context.applicationContext.getExternalFilesDir(null)?.let { File(it, "mms-log.txt") }
+        if (appContext == null) {
+            appContext = context.applicationContext
+        }
+    }
+
+    private fun resolveFile(): File? {
+        file?.let { return it }
+        val ctx = appContext ?: return null
+        return runCatching {
+            ctx.getExternalFilesDir(null)?.let { File(it, "mms-log.txt") }
+        }.getOrNull()?.also { file = it }
     }
 
     fun log(message: String) {
         Log.i("LiquidMms", message)
-        val f = file ?: return
+        val f = resolveFile() ?: return
         runCatching {
             if (f.length() > MAX_BYTES) {
                 // Keep the newest half.
@@ -40,10 +50,10 @@ object MmsLog {
         }
     }
 
-    fun read(): String = runCatching { file?.readText().orEmpty() }.getOrDefault("")
+    fun read(): String = runCatching { resolveFile()?.readText().orEmpty() }.getOrDefault("")
 
     fun clear() {
-        runCatching { file?.writeText("") }
+        runCatching { resolveFile()?.writeText("") }
     }
 
     /** One line about the cellular data situation (MMS needs cellular). */

@@ -17,6 +17,7 @@ import com.liquidglass.messages.data.model.Message
 import com.liquidglass.messages.data.model.MessageStatus
 import com.liquidglass.messages.data.mms.MmsCoordinator
 import com.liquidglass.messages.data.mms.MmsStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.awaitClose
@@ -74,9 +75,15 @@ class SmsRepositoryImpl(
         // Re-read and emit on every provider change; collisions are coalesced by
         // the single-capacity conflated channel so we never queue stale reads.
         suspend fun emitSnapshot() {
-            val fresh = getConversations()
-            trySend(fresh)
-            if (hasReadSms()) inboxCache.save(fresh)
+            try {
+                val fresh = getConversations()
+                trySend(fresh)
+                if (hasReadSms()) inboxCache.save(fresh)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                // Keep collecting even if a transient OEM provider error occurs.
+            }
         }
 
         // Show the last known inbox immediately; the real read follows.
@@ -91,10 +98,12 @@ class SmsRepositoryImpl(
             }
         }
         // Observe both the unified mms-sms surface and plain sms, since OEMs
-        // notify on different uris.
-        resolver.registerContentObserver(Telephony.MmsSms.CONTENT_URI, true, observer)
-        resolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
-        resolver.registerContentObserver(CONVERSATIONS_URI, true, observer)
+        // notify on different uris. Guard each registration individually because
+        // MIUI / OEM AppOps can throw SecurityException on mms-sms URIs right
+        // after role grant or under vendor privacy restrictions.
+        runCatching { resolver.registerContentObserver(Telephony.MmsSms.CONTENT_URI, true, observer) }
+        runCatching { resolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer) }
+        runCatching { resolver.registerContentObserver(CONVERSATIONS_URI, true, observer) }
         // Deleting / recovering or explicit SMS/MMS status updates also refresh the inbox.
         trash?.let { t -> launch { t.state.collect { changes.trySend(Unit) } } }
         launch { refreshSignals.collect { changes.trySend(Unit) } }
@@ -108,7 +117,7 @@ class SmsRepositoryImpl(
             }
         }
 
-        awaitClose { resolver.unregisterContentObserver(observer) }
+        awaitClose { runCatching { resolver.unregisterContentObserver(observer) } }
     }
         .conflate()
         .flowOn(ioDispatcher)
@@ -150,10 +159,11 @@ class SmsRepositoryImpl(
             null, null, "date DESC",
         )?.use { c ->
             while (c.moveToNext()) {
+                val id = c.getLong(0)
                 val count = c.getInt(2)
-                if (count <= 0) continue
+                if (id <= 0L || count <= 0) continue
                 rows += Row(
-                    id = c.getLong(0),
+                    id = id,
                     date = c.getLong(1),
                     count = count,
                     recipientIds = c.getString(3)?.split(' ')?.mapNotNull { it.trim().toLongOrNull() }.orEmpty(),
@@ -374,7 +384,13 @@ class SmsRepositoryImpl(
 
     override fun observeMessages(threadId: Long): Flow<List<Message>> = callbackFlow {
         suspend fun emitSnapshot() {
-            trySend(getMessages(threadId))
+            try {
+                trySend(getMessages(threadId))
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                // Keep collecting even if a transient OEM provider error occurs.
+            }
         }
 
         val changes = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
@@ -383,9 +399,9 @@ class SmsRepositoryImpl(
                 changes.trySend(Unit)
             }
         }
-        resolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
-        resolver.registerContentObserver(Telephony.MmsSms.CONTENT_URI, true, observer)
-        resolver.registerContentObserver(Telephony.Mms.CONTENT_URI, true, observer)
+        runCatching { resolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer) }
+        runCatching { resolver.registerContentObserver(Telephony.MmsSms.CONTENT_URI, true, observer) }
+        runCatching { resolver.registerContentObserver(Telephony.Mms.CONTENT_URI, true, observer) }
         trash?.let { t -> launch { t.state.collect { changes.trySend(Unit) } } }
         launch { refreshSignals.collect { changes.trySend(Unit) } }
 
@@ -399,7 +415,7 @@ class SmsRepositoryImpl(
             }
         }
 
-        awaitClose { resolver.unregisterContentObserver(observer) }
+        awaitClose { runCatching { resolver.unregisterContentObserver(observer) } }
     }
         .conflate()
         .flowOn(ioDispatcher)
@@ -757,11 +773,12 @@ class SmsRepositoryImpl(
         }.getOrDefault(0)
     }
 
-    /** Hides conversations whose every message is in Recently Deleted. */
+    /** Hides conversations whose every message is in Recently Deleted, and ensures unique thread IDs. */
     private fun visibleOnly(list: List<Conversation>): List<Conversation> {
-        val t = trash?.state?.value ?: return list
-        if (t.threads.isEmpty()) return list
-        return list.filter { c -> t.threads[c.threadId]?.let { c.timestamp > it.cutoff } ?: true }
+        val unique = list.distinctBy { it.threadId }
+        val t = trash?.state?.value ?: return unique
+        if (t.threads.isEmpty()) return unique
+        return unique.filter { c -> t.threads[c.threadId]?.let { c.timestamp > it.cutoff } ?: true }
     }
 
     override suspend fun deleteThread(threadId: Long) {
