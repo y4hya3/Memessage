@@ -52,6 +52,7 @@ class ConversationCache(context: Context) {
         put("p", c.photoUri ?: JSONObject.NULL)
         put("r", JSONArray(c.recipients))
         put("rn", JSONArray(c.recipientNames))
+        put("f", c.latestMessageFailed)
     }
 
     private fun decode(o: JSONObject): Conversation {
@@ -72,6 +73,7 @@ class ConversationCache(context: Context) {
             photoUri = if (o.isNull("p")) null else o.getString("p"),
             recipients = strings("r").ifEmpty { listOf(address) },
             recipientNames = strings("rn"),
+            latestMessageFailed = o.optBoolean("f", false),
         )
     }
 }

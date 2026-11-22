@@ -7,6 +7,8 @@
     <string name="empty_conversations_title">No Messages</string>
     <string name="empty_conversations_subtitle">Tap the compose button to start a conversation.</string>
     <string name="edit">Edit</string>
+    <string name="failed_to_send_inbox">Failed to send</string>
+    <string name="draft_label">Draft:</string>
 
     <!-- Chat -->
     <string name="message_hint">Message</string>

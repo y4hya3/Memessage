@@ -46,12 +46,15 @@ fun ContactAvatar(
     val initials = remember(name) { iosInitials(name) }
     val context = LocalContext.current
     val sizePx = with(LocalDensity.current) { size.roundToPx() }
+    val avatarBrush = remember(colors.avatarTop, colors.avatarBottom) {
+        Brush.verticalGradient(listOf(colors.avatarTop, colors.avatarBottom))
+    }
 
     Box(
         modifier = modifier
             .size(size)
             .clip(CircleShape)
-            .background(Brush.verticalGradient(listOf(colors.avatarTop, colors.avatarBottom))),
+            .background(avatarBrush),
         contentAlignment = Alignment.Center,
     ) {
         if (initials != null) {

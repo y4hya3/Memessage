@@ -21,6 +21,9 @@ interface SmsRepository {
     /** The inbox as last shown (disk cache), for an instant first frame; null if none. */
     fun cachedConversations(): List<Conversation>? = null
 
+    /** Triggers an immediate refresh on active conversation and message observers. */
+    fun notifyDataChanged() {}
+
     /** Emits messages in [threadId] oldest-first, and re-emits on any change. */
     fun observeMessages(threadId: Long): Flow<List<Message>>
 

@@ -57,6 +57,11 @@ class ServiceLocator(private val appContext: Context) {
     /** Per-thread preferences (muted notification threads). */
     val threadPrefs: ThreadPrefs by lazy { ThreadPrefs(appContext) }
 
+    /** Local persistent drafts per conversation thread. */
+    val draftStore: com.liquidglass.messages.data.local.DraftStore by lazy {
+        com.liquidglass.messages.data.local.DraftStore(appContext)
+    }
+
     /** iOS "Recently Deleted" (30-day trash). */
     val trash: com.liquidglass.messages.data.local.TrashStore by lazy {
         com.liquidglass.messages.data.local.TrashStore(appContext)

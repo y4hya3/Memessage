@@ -8,6 +8,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import com.liquidglass.messages.MessagesApplication
+import com.liquidglass.messages.data.local.DraftStore
 import com.liquidglass.messages.data.local.MessageMeta
 import com.liquidglass.messages.data.local.MessageMetaStore
 import com.liquidglass.messages.data.model.Contact
@@ -79,7 +80,8 @@ class ChatViewModel(
     private val reactionSync: ReactionSyncManager,
     private val scheduler: ScheduledMessageStore,
     threadId: Long,
-    val address: String
+    val address: String,
+    private val draftStore: DraftStore? = null,
 ) : ViewModel() {
 
     /** Mutable thread id: may be resolved lazily for brand-new conversations. */
@@ -94,6 +96,9 @@ class ChatViewModel(
     /** Composer text, kept separate from [uiState] so typing doesn't churn it. */
     private val _inputText = MutableStateFlow("")
     val inputText: StateFlow<String> = _inputText.asStateFlow()
+
+    /** Tracks whether the user has modified the composer in this session. */
+    @Volatile private var userEditedInput = false
 
     /** Effect chosen in the composer, applied to the next outgoing message. */
     private val _selectedEffect = MutableStateFlow(MessageEffect.NONE)
@@ -115,6 +120,11 @@ class ChatViewModel(
     private val reactionSendJobs = HashMap<Long, Job>()
 
     init {
+        // Restore any saved draft immediately before the first composition frame.
+        draftStore?.getDraft(this.threadId, address)?.let { saved ->
+            if (saved.isNotBlank()) _inputText.value = saved
+        }
+
         // Mirror the tapback/effect store into ui state so bubbles re-render the
         // instant a reaction or effect changes.
         viewModelScope.launch {
@@ -135,7 +145,21 @@ class ChatViewModel(
         // Resolve the thread id if needed, then stream messages and mark read.
         viewModelScope.launch {
             if (this@ChatViewModel.threadId <= 0L) {
-                this@ChatViewModel.threadId = repository.getOrCreateThreadId(address)
+                val resolved = repository.getOrCreateThreadId(address)
+                this@ChatViewModel.threadId = resolved
+                if (resolved > 0L) {
+                    val current = _inputText.value
+                    if (userEditedInput) {
+                        if (current.isBlank()) draftStore?.clearDraft(resolved, address)
+                        else draftStore?.saveDraft(resolved, address, current)
+                    } else {
+                        draftStore?.migrateAddressToThread(resolved, address)
+                        val restored = draftStore?.getDraft(resolved, address)
+                        if (!restored.isNullOrBlank() && current.isBlank()) {
+                            _inputText.value = restored
+                        }
+                    }
+                }
             }
             markThreadRead()
             loadParticipants()
@@ -155,7 +179,16 @@ class ChatViewModel(
     private suspend fun loadParticipants() {
         val recipients = repository.getRecipients(threadId).ifEmpty { listOf(address) }
         val contacts = recipients.associateWith { repository.resolveContact(it) }
+        val group = recipients.size > 1
         _uiState.update { it.copy(recipients = recipients, participants = contacts) }
+        if (!userEditedInput) {
+            val expectedDraft = draftStore?.getDraft(threadId, address, isGroup = group).orEmpty()
+            if (_inputText.value != expectedDraft) {
+                _inputText.value = expectedDraft
+            }
+        } else if (group && _inputText.value.isNotBlank() && threadId > 0L) {
+            draftStore?.saveDraft(threadId, address, _inputText.value, isGroup = true)
+        }
     }
 
     /**
@@ -186,9 +219,16 @@ class ChatViewModel(
         Uri.fromFile(file)
     }.getOrNull()
 
-    /** Updates the composer text. */
+    /** Updates the composer text and immediately auto-saves (or clears if blank) the draft. */
     fun onInputChange(t: String) {
+        userEditedInput = true
         _inputText.value = t
+        val isGroup = _uiState.value.isGroup
+        if (t.isBlank()) {
+            draftStore?.clearDraft(threadId, address, isGroup)
+        } else {
+            draftStore?.saveDraft(threadId, address, t, isGroup)
+        }
     }
 
     /** Selects the send-effect applied to the next outgoing message. */
@@ -289,11 +329,13 @@ class ChatViewModel(
     }
 
     private fun resetComposer() {
+        userEditedInput = false
         _inputText.value = ""
         _attachments.value = emptyList()
         _sendLaterAt.value = null
         _selectedEffect.value = MessageEffect.NONE
         _replyTo.value = null
+        draftStore?.clearDraft(threadId, address, _uiState.value.isGroup)
     }
 
     /** Message the next send replies to (swipe-to-reply / menu → Reply). */
@@ -324,7 +366,7 @@ class ChatViewModel(
     /** Appends text to the composer (shared location / contact). */
     fun appendToComposer(text: String) {
         val cur = _inputText.value
-        _inputText.value = if (cur.isBlank()) text else "$cur\n$text"
+        onInputChange(if (cur.isBlank()) text else "$cur\n$text")
     }
 
     /** "Not Delivered — tap to try again": re-sends a failed message in place. */
@@ -350,9 +392,25 @@ class ChatViewModel(
             markThreadRead()
         } else {
             if (ActiveChat.threadId == threadId) ActiveChat.threadId = -1L
+            syncDraft()
             // Anything that slipped in while leaving is read too.
             markThreadRead()
         }
+    }
+
+    private fun syncDraft() {
+        val current = _inputText.value
+        val isGroup = _uiState.value.isGroup
+        if (current.isBlank()) {
+            draftStore?.clearDraft(threadId, address, isGroup)
+        } else {
+            draftStore?.saveDraft(threadId, address, current, isGroup)
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        syncDraft()
     }
 
     /** Marks the whole thread read (and clears its notification); safe before the id is resolved. */
@@ -388,7 +446,8 @@ class ChatViewModel(
                         reactionSync = app.container.reactionSyncManager,
                         scheduler = app.container.scheduledMessages,
                         threadId = threadId,
-                        address = address
+                        address = address,
+                        draftStore = app.container.draftStore,
                     )
                 }
             }

@@ -120,6 +120,7 @@ fun ChatScreen(
     /** Message to scroll to and highlight (from Contact Info). */
     jumpToMessageId: Long? = null,
     onJumpHandled: () -> Unit = {},
+    showBackButton: Boolean = true,
     viewModel: ChatViewModel = viewModel(key = "chat:$threadId:$address", factory = ChatViewModel.factory(threadId, address)),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -168,6 +169,7 @@ fun ChatScreen(
         onReplyTo = viewModel::setReplyTo,
         jumpToMessageId = jumpToMessageId,
         onJumpHandled = onJumpHandled,
+        showBackButton = showBackButton,
     )
 }
 
@@ -223,6 +225,7 @@ fun ChatContent(
     onReplyTo: (Message?) -> Unit = {},
     jumpToMessageId: Long? = null,
     onJumpHandled: () -> Unit = {},
+    showBackButton: Boolean = true,
 ) {
     val colors = LiquidTheme.colors
     val context = LocalContext.current
@@ -344,10 +347,11 @@ fun ChatContent(
             .background(colors.chatBackground)
             .then(if (wallpaperBrush != null) Modifier.background(wallpaperBrush) else Modifier),
     ) {
-      // iOS blurs the whole conversation behind the tapback menu.
+      // iOS blurs the whole conversation behind the tapback menu (skipped on low-RAM / < API 31).
+      val canBlurScreen = remember(context) { com.liquidglass.messages.util.DevicePerformance.supportsFullScreenBlur(context) }
       val menuBlur by animateDpAsState(
-          targetValue = if (menuTarget != null) 22.dp else 0.dp,
-          animationSpec = tween(260),
+          targetValue = if (menuTarget != null && canBlurScreen) 22.dp else 0.dp,
+          animationSpec = tween(220),
           label = "menuBlur",
       )
       Box(Modifier.fillMaxSize().then(if (menuBlur > 0.dp) Modifier.blur(menuBlur) else Modifier)) {
@@ -372,7 +376,10 @@ fun ChatContent(
             val bubbleMaxFraction = minOf(0.78f, 420.dp / maxWidth)
 
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .widthIn(max = 820.dp)
+                    .fillMaxSize(),
                 state = listState,
                 reverseLayout = true,
                 contentPadding = PaddingValues(
@@ -486,7 +493,10 @@ fun ChatContent(
             onVideo = {
                 IosDialogs.alert("FaceTime Unavailable", "Video calls aren't available for text messages yet.")
             },
-            modifier = Modifier.align(Alignment.TopCenter),
+            showBackButton = showBackButton,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .widthIn(max = 760.dp),
         )
 
         MessageInputBar(
@@ -507,6 +517,7 @@ fun ChatContent(
             onCancelReply = { onReplyTo(null) },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
+                .widthIn(max = 760.dp)
                 // Measured OUTSIDE the inset padding so the list's bottom padding
                 // tracks the keyboard / gesture bar too.
                 .onSizeChanged { composerHeightPx = it.height }
@@ -639,6 +650,7 @@ private fun ChatHeader(
     onBack: () -> Unit,
     onTitleClick: () -> Unit,
     onVideo: () -> Unit,
+    showBackButton: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val colors = LiquidTheme.colors
@@ -649,12 +661,14 @@ private fun ChatHeader(
             .height(HeaderHeight)
             .padding(horizontal = 16.dp),
     ) {
-        GlassCircleButton(
-            icon = IosIcons.ChevronLeft,
-            contentDescription = "Back",
-            onClick = onBack,
-            modifier = Modifier.align(Alignment.TopStart).padding(top = 6.dp),
-        )
+        if (showBackButton) {
+            GlassCircleButton(
+                icon = IosIcons.ChevronLeft,
+                contentDescription = "Back",
+                onClick = onBack,
+                modifier = Modifier.align(Alignment.TopStart).padding(top = 6.dp),
+            )
+        }
 
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,

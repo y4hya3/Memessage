@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -85,6 +86,8 @@ fun IosGroupedPage(
         LazyColumn(
             state = listState,
             modifier = Modifier
+                .align(Alignment.TopCenter)
+                .widthIn(max = 680.dp)
                 .fillMaxSize()
                 .backdropSource(backdrop)
                 .background(colors.groupedBackground),
@@ -107,6 +110,7 @@ fun IosGroupedPage(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
+                    .widthIn(max = 680.dp)
                     .fillMaxWidth()
                     .statusBarsPadding()
                     .height(56.dp)

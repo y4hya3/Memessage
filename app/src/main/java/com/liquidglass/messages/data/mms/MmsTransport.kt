@@ -190,6 +190,7 @@ class MmsDownloadedReceiver : BroadcastReceiver() {
                     transactionId = intent.getStringExtra(MmsTransport.EXTRA_TRANSACTION),
                     subscriptionId = sub,
                 )
+                runCatching { context.appContainer.smsRepository.notifyDataChanged() }
             } catch (t: Throwable) {
                 Log.e("MmsDownloaded", "Failed to handle downloaded MMS", t)
             } finally {
@@ -220,6 +221,7 @@ class MmsSentReceiver : BroadcastReceiver() {
         scope.launch {
             try {
                 context.appContainer.mmsStore.setBox(row, box, conf?.messageId)
+                runCatching { context.appContainer.smsRepository.notifyDataChanged() }
                 // Diagnostics: some OEM services remove rows they didn't write.
                 val exists = runCatching {
                     context.contentResolver.query(row, arrayOf(Telephony.Mms._ID), null, null, null)?.use { it.count > 0 }

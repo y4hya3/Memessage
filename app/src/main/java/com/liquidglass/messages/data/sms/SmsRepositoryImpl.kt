@@ -18,8 +18,10 @@ import com.liquidglass.messages.data.model.MessageStatus
 import com.liquidglass.messages.data.mms.MmsCoordinator
 import com.liquidglass.messages.data.mms.MmsStore
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flowOn
@@ -47,8 +49,16 @@ class SmsRepositoryImpl(
     private val appContext: Context = context.applicationContext
     private val resolver get() = appContext.contentResolver
     private val inboxCache = com.liquidglass.messages.data.local.ConversationCache(appContext)
+    private val refreshSignals = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
 
     override fun cachedConversations(): List<Conversation>? = inboxCache.load()?.let(::visibleOnly)
+
+    override fun notifyDataChanged() {
+        refreshSignals.tryEmit(Unit)
+    }
 
     // --- permissions -------------------------------------------------------
 
@@ -85,8 +95,9 @@ class SmsRepositoryImpl(
         resolver.registerContentObserver(Telephony.MmsSms.CONTENT_URI, true, observer)
         resolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
         resolver.registerContentObserver(CONVERSATIONS_URI, true, observer)
-        // Deleting / recovering changes what's visible without touching the provider.
+        // Deleting / recovering or explicit SMS/MMS status updates also refresh the inbox.
         trash?.let { t -> launch { t.state.collect { changes.trySend(Unit) } } }
+        launch { refreshSignals.collect { changes.trySend(Unit) } }
 
         launch {
             emitSnapshot()
@@ -168,15 +179,23 @@ class SmsRepositoryImpl(
             "${SmsColumns.READ} = 0 AND ${SmsColumns.TYPE} = ${SmsColumns.MESSAGE_TYPE_INBOX}", null, null,
         )?.use { c -> while (c.moveToNext()) unread.merge(c.getLong(0), 1, Int::plus) }
 
-        // Direction of the newest SMS per thread (preview colour), from recent rows only.
+        // Direction and failure state of the newest SMS per thread, from recent rows only.
         val outgoing = HashMap<Long, Boolean>()
+        val smsFailed = HashMap<Long, Boolean>()
         resolver.query(
-            Telephony.Sms.CONTENT_URI, arrayOf(SmsColumns.THREAD_ID, SmsColumns.TYPE),
-            null, null, "${SmsColumns.DATE} DESC LIMIT 500",
+            Telephony.Sms.CONTENT_URI,
+            arrayOf(SmsColumns.THREAD_ID, SmsColumns.TYPE, SmsColumns.STATUS),
+            null, null, "${SmsColumns.DATE} DESC, ${SmsColumns.ID} DESC LIMIT 500",
         )?.use { c ->
             while (c.moveToNext()) {
+                val type = c.getInt(1)
+                if (type == SmsColumns.MESSAGE_TYPE_DRAFT) continue
                 val t = c.getLong(0)
-                if (!outgoing.containsKey(t)) outgoing[t] = c.getInt(1) != SmsColumns.MESSAGE_TYPE_INBOX
+                if (!outgoing.containsKey(t)) {
+                    val status = if (c.isNull(2)) SmsColumns.STATUS_NONE else c.getInt(2)
+                    outgoing[t] = type != SmsColumns.MESSAGE_TYPE_INBOX
+                    smsFailed[t] = isSmsFailed(type, status)
+                }
             }
         }
 
@@ -203,6 +222,7 @@ class SmsRepositoryImpl(
                 photoUri = contact.photoUri,
                 recipients = recipients,
                 recipientNames = if (recipients.size > 1) recipients.map { contactsHelper.resolveContact(it).displayName } else emptyList(),
+                latestMessageFailed = if (mmsNewest) mms!!.failed else smsFailed[row.id] ?: false,
             )
         }
         result.sortByDescending { it.timestamp }
@@ -217,7 +237,8 @@ class SmsRepositoryImpl(
             var timestamp: Long,
             var messageCount: Int,
             var unreadCount: Int,
-            var latestType: Int
+            var latestType: Int,
+            var latestFailed: Boolean = false,
         )
 
         val byThread = LinkedHashMap<Long, Acc>()
@@ -230,7 +251,8 @@ class SmsRepositoryImpl(
             SmsColumns.ADDRESS,
             SmsColumns.DATE,
             SmsColumns.TYPE,
-            SmsColumns.READ
+            SmsColumns.READ,
+            SmsColumns.STATUS,
         )
         val newestId = HashMap<Long, Long>()
 
@@ -239,16 +261,18 @@ class SmsRepositoryImpl(
             projection,
             null,
             null,
-            "${SmsColumns.DATE} DESC"
+            "${SmsColumns.DATE} DESC, ${SmsColumns.ID} DESC"
         )?.use { cursor ->
             while (cursor.moveToNext()) {
                 val threadId = cursor.getLongOrZero(SmsColumns.THREAD_ID)
                 if (threadId == 0L) continue
 
+                val type = cursor.getIntOrDefault(SmsColumns.TYPE, SmsColumns.MESSAGE_TYPE_INBOX)
+                if (type == SmsColumns.MESSAGE_TYPE_DRAFT) continue
                 val address = cursor.getStringOrNull(SmsColumns.ADDRESS)?.trim().orEmpty()
                 val date = cursor.getLongOrZero(SmsColumns.DATE)
-                val type = cursor.getIntOrDefault(SmsColumns.TYPE, SmsColumns.MESSAGE_TYPE_INBOX)
                 val read = cursor.getIntOrDefault(SmsColumns.READ, 1)
+                val status = cursor.getIntOrDefault(SmsColumns.STATUS, SmsColumns.STATUS_NONE)
 
                 val acc = byThread[threadId]
                 if (acc == null) {
@@ -260,7 +284,8 @@ class SmsRepositoryImpl(
                         timestamp = date,
                         messageCount = 1,
                         unreadCount = if (type == SmsColumns.MESSAGE_TYPE_INBOX && read == 0) 1 else 0,
-                        latestType = type
+                        latestType = type,
+                        latestFailed = isSmsFailed(type, status),
                     )
                 } else {
                     acc.messageCount += 1
@@ -298,7 +323,7 @@ class SmsRepositoryImpl(
             val acc = byThread[threadId]
             if (acc == null) {
                 val address = threadRecipients[threadId]?.firstOrNull().orEmpty()
-                byThread[threadId] = Acc(address, m.snippet, m.dateMillis, m.count, m.unread, 0)
+                byThread[threadId] = Acc(address, m.snippet, m.dateMillis, m.count, m.unread, 0, latestFailed = m.failed)
                 outgoingByThread[threadId] = m.outgoing
             } else {
                 acc.messageCount += m.count
@@ -306,6 +331,7 @@ class SmsRepositoryImpl(
                 if (m.dateMillis > acc.timestamp) {
                     acc.snippet = m.snippet
                     acc.timestamp = m.dateMillis
+                    acc.latestFailed = m.failed
                     outgoingByThread[threadId] = m.outgoing
                 }
             }
@@ -335,6 +361,7 @@ class SmsRepositoryImpl(
                     photoUri = contact.photoUri,
                     recipients = recipients,
                     recipientNames = names,
+                    latestMessageFailed = acc.latestFailed,
                 )
             )
         }
@@ -360,6 +387,7 @@ class SmsRepositoryImpl(
         resolver.registerContentObserver(Telephony.MmsSms.CONTENT_URI, true, observer)
         resolver.registerContentObserver(Telephony.Mms.CONTENT_URI, true, observer)
         trash?.let { t -> launch { t.state.collect { changes.trySend(Unit) } } }
+        launch { refreshSignals.collect { changes.trySend(Unit) } }
 
         launch {
             emitSnapshot()
@@ -420,6 +448,7 @@ class SmsRepositoryImpl(
                 val body = cursor.getStringOrNull(SmsColumns.BODY).orEmpty()
                 val date = cursor.getLongOrZero(SmsColumns.DATE)
                 val type = cursor.getIntOrDefault(SmsColumns.TYPE, SmsColumns.MESSAGE_TYPE_INBOX)
+                if (type == SmsColumns.MESSAGE_TYPE_DRAFT) continue
                 val readInt = cursor.getIntOrDefault(SmsColumns.READ, 1)
                 val statusRaw = cursor.getIntOrDefault(SmsColumns.STATUS, SmsColumns.STATUS_NONE)
                 val subId = cursor.getIntOrDefault(SmsColumns.SUBSCRIPTION_ID, -1)
@@ -468,6 +497,10 @@ class SmsRepositoryImpl(
         }
     }
 
+    private fun isSmsFailed(type: Int, status: Int): Boolean =
+        type == SmsColumns.MESSAGE_TYPE_FAILED ||
+            (type == SmsColumns.MESSAGE_TYPE_SENT && status == SmsColumns.STATUS_FAILED)
+
     // --- sending -----------------------------------------------------------
 
     override suspend fun sendMessage(
@@ -504,6 +537,7 @@ class SmsRepositoryImpl(
                 // Not the default SMS app: still attempt to send, just without a row.
                 null
             }
+            notifyDataChanged()
 
             // Hand off to the platform. The "sent" PendingIntent ALWAYS fires, so
             // SmsSender's internal receiver is the authoritative updater that flips
@@ -528,7 +562,9 @@ class SmsRepositoryImpl(
 
     override suspend fun resendMessage(messageId: Long): Result<Unit> = withContext(ioDispatcher) {
         if (Message.isMmsId(messageId)) {
-            return@withContext if (mms.resend(messageId - Message.MMS_ID_OFFSET, -1)) Result.success(Unit)
+            val ok = mms.resend(messageId - Message.MMS_ID_OFFSET, -1)
+            notifyDataChanged()
+            return@withContext if (ok) Result.success(Unit)
             else Result.failure(IllegalStateException("MMS resend failed"))
         }
         val uri = ContentUris.withAppendedId(Telephony.Sms.CONTENT_URI, messageId)
@@ -554,6 +590,7 @@ class SmsRepositoryImpl(
                 put(Telephony.Sms.DATE, System.currentTimeMillis())
             }
             resolver.update(uri, values, null, null)
+            notifyDataChanged()
 
             if (!sender.sendTextMessage(address, body, subId, uri)) {
                 markFailed(uri)
@@ -571,6 +608,7 @@ class SmsRepositoryImpl(
                 put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_FAILED)
             }
             resolver.update(uri, values, null, null)
+            notifyDataChanged()
         } catch (_: Exception) {
             // Can't write (not default app) — nothing more we can do.
         }
@@ -601,6 +639,7 @@ class SmsRepositoryImpl(
                 }
             }
             val uri = resolver.insert(Telephony.Sms.Inbox.CONTENT_URI, values)
+            if (uri != null) notifyDataChanged()
             uri?.let { ContentUris.parseId(it) } ?: -1L
         } catch (_: SecurityException) {
             -1L
@@ -617,7 +656,9 @@ class SmsRepositoryImpl(
         attachments: List<Uri>,
         subscriptionId: Int,
     ): Result<Unit> = withContext(ioDispatcher) {
-        if (mms.send(recipients, text, attachments, subscriptionId)) Result.success(Unit)
+        val ok = mms.send(recipients, text, attachments, subscriptionId)
+        notifyDataChanged()
+        if (ok) Result.success(Unit)
         else Result.failure(IllegalStateException("MMS was not sent"))
     }
 

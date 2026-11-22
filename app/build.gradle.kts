@@ -46,10 +46,10 @@ android {
 
     buildTypes {
         release {
-            // Minification is OFF by default so the signed release is guaranteed to
-            // run without device testing; flip both to true once R8 is verified.
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // R8 shrinking & optimization reduces APK size, cold start time, and RAM
+            // usage across entry-level devices (Redmi 9C) and tablets (Galaxy Tab A7).
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

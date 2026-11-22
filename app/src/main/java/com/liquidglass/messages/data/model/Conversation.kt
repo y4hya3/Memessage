@@ -28,6 +28,10 @@ data class Conversation(
     val recipients: List<String> = listOf(address),
     /** Display names for [recipients] (same order); used for group titles. */
     val recipientNames: List<String> = emptyList(),
+    /** True when the latest message in the thread failed to send. */
+    val latestMessageFailed: Boolean = false,
+    /** Unsent draft text for this thread, if any. */
+    val draftText: String? = null,
 ) {
     val isGroup: Boolean get() = recipients.size > 1
 
@@ -40,4 +44,6 @@ data class Conversation(
         }
 
     val hasUnread: Boolean get() = unreadCount > 0
+
+    val hasDraft: Boolean get() = !draftText.isNullOrBlank()
 }

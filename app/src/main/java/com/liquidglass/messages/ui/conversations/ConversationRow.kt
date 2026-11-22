@@ -37,10 +37,19 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.liquidglass.messages.R
 import com.liquidglass.messages.data.model.Conversation
 import com.liquidglass.messages.ui.components.ContactAvatar
 import com.liquidglass.messages.ui.components.IosDialogs
@@ -93,6 +102,7 @@ fun ConversationRow(
     modifier: Modifier = Modifier,
     muted: Boolean = false,
     pinned: Boolean = false,
+    selected: Boolean = false,
     onLongPress: (() -> Unit)? = null,
     onTogglePin: (() -> Unit)? = null,
     onToggleMute: (() -> Unit)? = null,
@@ -139,7 +149,7 @@ fun ConversationRow(
         scope.launch { offsetX.animateTo(target, spring(dampingRatio = 0.85f, stiffness = 500f)) }
     }
 
-    Box(modifier = modifier.fillMaxWidth()) {
+    Box(modifier = modifier.fillMaxWidth().testTag("conversation_row_${conversation.threadId}")) {
         // Swipe actions underneath the row: leading from the left, trailing on the right.
         Row(Modifier.matchParentSize()) {
             if (offsetX.value > 0f) {
@@ -151,11 +161,12 @@ fun ConversationRow(
             }
         }
 
+        val rowBg = if (selected) colors.accent.copy(alpha = if (colors.isDark) 0.22f else 0.12f) else colors.listBackground
         Row(
             modifier = Modifier
                 .offset { IntOffset(offsetX.value.roundToInt(), 0) }
                 .fillMaxWidth()
-                .background(colors.listBackground)
+                .background(rowBg)
                 .draggable(
                     orientation = Orientation.Horizontal,
                     state = rememberDraggableState { delta ->
@@ -235,15 +246,81 @@ fun ConversationRow(
                         modifier = Modifier.padding(start = 4.dp).size(12.dp),
                     )
                 }
-                Text(
-                    text = remember(conversation.snippet) { snippetText(conversation.snippet) },
-                    style = IosType.subheadline,
-                    fontFamily = fontFamilyFor(conversation.snippet),
-                    fontWeight = FontWeight.Normal,
-                    color = colors.secondaryText,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                val snippetPreview = remember(conversation.snippet) { snippetText(conversation.snippet) }
+                val draftPreview = remember(conversation.draftText) {
+                    conversation.draftText?.trim()?.replace(Regex("\\s+"), " ").orEmpty()
+                }
+                if (conversation.latestMessageFailed) {
+                    val failedLabel = stringResource(R.string.failed_to_send_inbox)
+                    Row(
+                        modifier = Modifier.testTag("conversation_failed_status_${conversation.threadId}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(16.dp)
+                                .background(colors.destructive, CircleShape)
+                                .testTag("conversation_failed_icon_${conversation.threadId}")
+                                .semantics { contentDescription = failedLabel },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "!",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = buildAnnotatedString {
+                                withStyle(SpanStyle(color = colors.destructive, fontWeight = FontWeight.SemiBold)) {
+                                    append(failedLabel)
+                                }
+                                if (!conversation.hasDraft && snippetPreview.isNotBlank()) {
+                                    withStyle(SpanStyle(color = colors.secondaryText, fontWeight = FontWeight.Normal)) {
+                                        append(" · ")
+                                        append(snippetPreview)
+                                    }
+                                }
+                            },
+                            style = IosType.subheadline,
+                            fontFamily = fontFamilyFor(snippetPreview),
+                            maxLines = if (conversation.hasDraft) 1 else 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                if (conversation.hasDraft) {
+                    val draftLabel = stringResource(R.string.draft_label)
+                    Text(
+                        text = buildAnnotatedString {
+                            withStyle(SpanStyle(color = colors.destructive, fontWeight = FontWeight.SemiBold)) {
+                                append(draftLabel)
+                            }
+                            withStyle(SpanStyle(color = colors.secondaryText, fontWeight = FontWeight.Normal)) {
+                                append(" ")
+                                append(draftPreview)
+                            }
+                        },
+                        style = IosType.subheadline,
+                        fontFamily = fontFamilyFor(draftPreview),
+                        maxLines = if (conversation.latestMessageFailed) 1 else 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("conversation_draft_indicator_${conversation.threadId}"),
+                    )
+                }
+                if (!conversation.latestMessageFailed && !conversation.hasDraft) {
+                    Text(
+                        text = snippetPreview,
+                        style = IosType.subheadline,
+                        fontFamily = fontFamilyFor(conversation.snippet),
+                        fontWeight = FontWeight.Normal,
+                        color = colors.secondaryText,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
 

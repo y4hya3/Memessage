@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -44,6 +45,8 @@ import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import coil.request.ImageRequest
+import coil.size.Precision
+import coil.size.Scale
 import com.liquidglass.messages.data.model.Attachment
 import com.liquidglass.messages.ui.components.GlassCircleButton
 import com.liquidglass.messages.ui.components.IosIcons
@@ -66,6 +69,9 @@ fun AttachmentStack(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val maxThumbW = remember(density) { with(density) { 250.dp.roundToPx() } }
+    val maxThumbH = remember(density) { with(density) { 340.dp.roundToPx() } }
     Column(
         modifier = modifier,
         horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start,
@@ -79,10 +85,20 @@ fun AttachmentStack(
             when {
                 a.isImage -> {
                     // Fixed card while decoding (no size is known yet), then the
-                    // photo's own aspect ratio within iOS's max bounds.
+                    // photo's own aspect ratio within iOS's max bounds. Bounded decode
+                    // prevents 12-50MP camera images from exhausting RAM on 2-3GB devices.
                     var loaded by remember(a.uri) { mutableStateOf(false) }
+                    val request = remember(a.uri, maxThumbW, maxThumbH) {
+                        ImageRequest.Builder(context)
+                            .data(Uri.parse(a.uri))
+                            .size(maxThumbW, maxThumbH)
+                            .scale(Scale.FIT)
+                            .precision(Precision.INEXACT)
+                            .crossfade(true)
+                            .build()
+                    }
                     AsyncImage(
-                        model = ImageRequest.Builder(context).data(Uri.parse(a.uri)).crossfade(true).build(),
+                        model = request,
                         contentDescription = a.name ?: "Photo",
                         contentScale = ContentScale.Fit,
                         onState = { loaded = it is AsyncImagePainter.State.Success },

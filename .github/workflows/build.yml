@@ -1,33 +1,104 @@
-name: Build
+name: Build & Release APK
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Unit & screenshot tests
+      - name: Read app version metadata
+        id: version
+        run: |
+          VERSION_NAME=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          VERSION_CODE=$(grep -m1 'versionCode' app/build.gradle.kts | sed -E 's/.*=\s*([0-9]+).*/\1/')
+          echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests
         run: ./gradlew testDebugUnitTest --no-daemon
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon
+      - name: Configure APK signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
+            cat > keystore.properties <<EOF
+          storeFile=release.keystore
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          else
+            if [ ! -f debug.keystore ]; then
+              keytool -genkeypair -v \
+                -keystore debug.keystore \
+                -storepass android \
+                -alias androiddebugkey \
+                -keypass android \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+            cat > keystore.properties <<EOF
+          storeFile=debug.keystore
+          storePassword=android
+          keyAlias=androiddebugkey
+          keyPassword=android
+          EOF
+          fi
 
-      - uses: actions/upload-artifact@v4
+      - name: Build signed Release & Debug APKs
+        run: ./gradlew assembleRelease assembleDebug --no-daemon
+
+      - name: Prepare named APK outputs
+        run: |
+          mkdir -p release-apks
+          cp app/build/outputs/apk/release/app-release.apk "release-apks/LiquidMessages-v${{ steps.version.outputs.name }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "release-apks/LiquidMessages-v${{ steps.version.outputs.name }}-debug.apk"
+
+      - name: Upload workflow APK artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: liquid-messages-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: liquid-messages-apks-v${{ steps.version.outputs.name }}
+          path: release-apks/*.apk
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}-build.{1}', steps.version.outputs.name, github.run_number) }}
+          name: Liquid Messages v${{ steps.version.outputs.name }} (Build ${{ github.run_number }})
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            release-apks/LiquidMessages-v${{ steps.version.outputs.name }}.apk
+            release-apks/LiquidMessages-v${{ steps.version.outputs.name }}-debug.apk

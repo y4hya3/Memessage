@@ -15,6 +15,7 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -37,11 +38,15 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.liquidglass.messages.ui.theme.LiquidTheme
+import com.liquidglass.messages.util.DevicePerformance
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -51,22 +56,20 @@ import kotlin.math.roundToInt
  * How it works (the same approach Apple's material takes, rebuilt with
  * Android primitives):
  *  1. The scrolling content is recorded once per frame into a [GraphicsLayer]
- *     via [backdropSource]. Nothing extra is drawn; the layer is simply shared.
+ *     via [backdropSource]. On Android < 12 where RenderEffect isn't available,
+ *     recording is skipped completely so entry-level GPUs (e.g. Redmi 9C) pay
+ *     zero offscreen pass cost.
  *  2. Each glass element ([liquidGlass]) draws that same layer again, shifted
- *     to its own position, through a stack of effects:
- *       • a light blur (API 31+),
- *       • an AGSL lens shader (API 33+) that bends the content near the rim —
- *         the tell-tale refraction of Liquid Glass — with a touch of chromatic
- *         dispersion,
- *       • a vibrancy colour matrix (saturation/brightness boost).
- *  3. A thin specular rim and a soft tint are painted on top.
- *
- * Below API 31 (no RenderEffect) it degrades to a frosted translucent fill.
- * Because the element draws the source's RenderNode by reference, it updates
- * as the list scrolls without being re-recorded.
+ *     to its own position, through a cached effect stack (blur on API 31+,
+ *     plus AGSL lens shader on API 33+ with ample RAM).
+ *  3. A cached specular rim and a soft tint are painted on top.
  */
 @Stable
-class Backdrop internal constructor(internal val layer: GraphicsLayer) {
+class Backdrop internal constructor(
+    internal val layer: GraphicsLayer,
+    internal val enabled: Boolean = true,
+    internal val lowRam: Boolean = false,
+) {
     /** Top-left of the source in root coordinates. */
     internal var origin by mutableStateOf(Offset.Zero)
     internal var recorded by mutableStateOf(false)
@@ -74,27 +77,38 @@ class Backdrop internal constructor(internal val layer: GraphicsLayer) {
 
 @Composable
 fun rememberBackdrop(): Backdrop {
+    val view = LocalView.current
+    val context = LocalContext.current
     val layer = rememberGraphicsLayer()
-    return remember(layer) { Backdrop(layer) }
+    val enabled = remember(view.isInEditMode) {
+        !view.isInEditMode && DevicePerformance.supportsBackdropGlass()
+    }
+    val lowRam = remember(view.isInEditMode, context) {
+        !view.isInEditMode && DevicePerformance.isLowRam(context)
+    }
+    return remember(layer, enabled, lowRam) { Backdrop(layer, enabled, lowRam) }
 }
 
 /** The backdrop glass elements refract; null = plain frosted fallback. */
 val LocalBackdrop = staticCompositionLocalOf<Backdrop?> { null }
 
 /** Records this node's drawing into [backdrop] (and still draws it normally). */
-fun Modifier.backdropSource(backdrop: Backdrop): Modifier = this
-    .onGloballyPositioned { backdrop.origin = it.positionInRoot() }
-    .drawWithContent {
-        // RenderNodes only exist on hardware canvases; a software draw (e.g. a
-        // system screenshot or View.draw into a Bitmap) must take the plain path.
-        if (!drawContext.canvas.nativeCanvas.isHardwareAccelerated) {
-            drawContent()
-            return@drawWithContent
+fun Modifier.backdropSource(backdrop: Backdrop): Modifier {
+    if (!backdrop.enabled) return this
+    return this
+        .onGloballyPositioned { backdrop.origin = it.positionInRoot() }
+        .drawWithContent {
+            // RenderNodes only exist on hardware canvases; a software draw (e.g. a
+            // system screenshot or View.draw into a Bitmap) must take the plain path.
+            if (!drawContext.canvas.nativeCanvas.isHardwareAccelerated) {
+                drawContent()
+                return@drawWithContent
+            }
+            backdrop.layer.record { this@drawWithContent.drawContent() }
+            drawLayer(backdrop.layer)
+            if (!backdrop.recorded) backdrop.recorded = true
         }
-        backdrop.layer.record { this@drawWithContent.drawContent() }
-        drawLayer(backdrop.layer)
-        if (!backdrop.recorded) backdrop.recorded = true
-    }
+}
 
 /** Tunables of the glass material. Defaults match iOS 26 controls. */
 data class GlassStyle(
@@ -117,6 +131,22 @@ data class GlassStyle(
     }
 }
 
+private class GlassDrawCache {
+    var size: Size = Size.Unspecified
+    var layoutDirection: LayoutDirection = LayoutDirection.Ltr
+    var isDark: Boolean = false
+    var style: GlassStyle? = null
+    var useLens: Boolean = false
+
+    var outline: Outline? = null
+    var path: Path? = null
+    var rimBrush: Brush? = null
+    var effect: RenderEffect? = null
+    var vibrancyFilter: ColorFilter? = null
+    var lastSaturation: Float = Float.NaN
+    var margin: Int = 0
+}
+
 /**
  * Paints this element as Liquid Glass of [shape] over the current
  * [LocalBackdrop]. Content of the element (icons, text) draws on top.
@@ -126,10 +156,15 @@ fun Modifier.liquidGlass(
     style: GlassStyle = GlassStyle(),
 ): Modifier = composed {
     val backdrop = LocalBackdrop.current
+    val context = LocalContext.current
     val colors = LiquidTheme.colors
     val glassLayer = rememberGraphicsLayer()
+    val drawCache = remember { GlassDrawCache() }
     var position by remember { mutableStateOf(Offset.Zero) }
-    val shader = remember { if (Build.VERSION.SDK_INT >= 33) LensShader.create() else null }
+    val useLens = remember(context, backdrop?.lowRam) {
+        DevicePerformance.supportsLensShader(context) && backdrop?.lowRam != true
+    }
+    val shader = remember(useLens) { if (useLens && Build.VERSION.SDK_INT >= 33) LensShader.create() else null }
 
     val tint = style.tint ?: when {
         style.menu && colors.isDark -> Color(0x9E1C1C1E)
@@ -140,18 +175,68 @@ fun Modifier.liquidGlass(
         else -> Color(0x59FFFFFF)
     }
     val fallbackFill = if (style.menu) colors.glassFillStrong else colors.glassFill
+    val outerStrokeColor = if (colors.isDark) Color(0x1FFFFFFF) else Color(0x14000000)
 
     this
-        .onGloballyPositioned { position = it.positionInRoot() }
+        .then(
+            if (backdrop != null && backdrop.enabled) {
+                Modifier.onGloballyPositioned { position = it.positionInRoot() }
+            } else {
+                Modifier
+            }
+        )
         .drawBehind {
-            val outline = shape.createOutline(size, layoutDirection, this)
-            val path = outline.toPath()
-            val canRefract = backdrop != null && backdrop.recorded &&
+            val sizeChanged = drawCache.size != size || drawCache.layoutDirection != layoutDirection
+            val themeChanged = drawCache.isDark != colors.isDark
+            val styleChanged = drawCache.style != style || drawCache.useLens != useLens
+
+            if (sizeChanged || drawCache.outline == null) {
+                val created = shape.createOutline(size, layoutDirection, this)
+                drawCache.outline = created
+                drawCache.path = created.toPath()
+                drawCache.size = size
+                drawCache.layoutDirection = layoutDirection
+            }
+            if (sizeChanged || themeChanged || drawCache.rimBrush == null) {
+                drawCache.rimBrush = Brush.linearGradient(
+                    colors = if (colors.isDark) DARK_RIM_COLORS else LIGHT_RIM_COLORS,
+                    start = Offset.Zero,
+                    end = Offset(size.width, size.height),
+                )
+                drawCache.isDark = colors.isDark
+            }
+            if (drawCache.lastSaturation != style.saturation || drawCache.vibrancyFilter == null) {
+                drawCache.vibrancyFilter = ColorFilter.colorMatrix(vibrancy(style.saturation))
+                drawCache.lastSaturation = style.saturation
+            }
+
+            val outline = drawCache.outline!!
+            val path = drawCache.path!!
+            val canRefract = backdrop != null && backdrop.enabled && backdrop.recorded &&
                 Build.VERSION.SDK_INT >= 31 &&
                 drawContext.canvas.nativeCanvas.isHardwareAccelerated
 
             if (canRefract) {
-                drawRefractedBackdrop(backdrop!!, glassLayer, path, position, style, shader, outline)
+                if (sizeChanged || styleChanged) {
+                    val margin = if (useLens) {
+                        (style.refractionAmount.toPx() + style.blur.toPx() * 3f).roundToInt()
+                    } else {
+                        (style.blur.toPx() * 3f).roundToInt()
+                    }
+                    drawCache.margin = margin
+                    drawCache.effect = effectFor(style, if (useLens) shader else null, margin, outline)
+                    drawCache.style = style
+                    drawCache.useLens = useLens
+                }
+                drawRefractedBackdrop(
+                    backdrop = backdrop!!,
+                    glassLayer = glassLayer,
+                    clip = path,
+                    position = position,
+                    margin = drawCache.margin,
+                    renderEffect = drawCache.effect,
+                    vibrancyFilter = drawCache.vibrancyFilter,
+                )
                 drawOutline(outline, tint)
             } else {
                 drawOutline(outline, fallbackFill)
@@ -159,40 +244,31 @@ fun Modifier.liquidGlass(
 
             // Specular rim: bright where light hits (top-left / bottom-right),
             // fading along the sides — what gives the glass its thickness.
-            val rim = Brush.linearGradient(
-                colors = if (colors.isDark) {
-                    listOf(Color(0x66FFFFFF), Color(0x14FFFFFF), Color(0x0AFFFFFF), Color(0x40FFFFFF))
-                } else {
-                    listOf(Color(0xF2FFFFFF), Color(0x55FFFFFF), Color(0x26FFFFFF), Color(0xCCFFFFFF))
-                },
-                start = Offset.Zero,
-                end = Offset(size.width, size.height),
-            )
-            drawOutline(outline, rim, style = Stroke(width = 1.2.dp.toPx()))
+            drawOutline(outline, drawCache.rimBrush!!, style = Stroke(width = 1.2.dp.toPx()))
             // Faint outer definition so white glass reads on white backgrounds.
-            drawOutline(outline, if (colors.isDark) Color(0x1FFFFFFF) else Color(0x14000000), style = Stroke(0.5.dp.toPx()))
+            drawOutline(outline, outerStrokeColor, style = Stroke(0.5.dp.toPx()))
         }
 }
+
+private val DARK_RIM_COLORS = listOf(Color(0x66FFFFFF), Color(0x14FFFFFF), Color(0x0AFFFFFF), Color(0x40FFFFFF))
+private val LIGHT_RIM_COLORS = listOf(Color(0xF2FFFFFF), Color(0x55FFFFFF), Color(0x26FFFFFF), Color(0xCCFFFFFF))
 
 private fun DrawScope.drawRefractedBackdrop(
     backdrop: Backdrop,
     glassLayer: GraphicsLayer,
     clip: Path,
     position: Offset,
-    style: GlassStyle,
-    shader: Any?,
-    outline: Outline,
+    margin: Int,
+    renderEffect: RenderEffect?,
+    vibrancyFilter: ColorFilter?,
 ) {
-    // Record a margin around the element so blur/refraction can sample
-    // content from just outside its bounds instead of transparent pixels.
-    val margin = (style.refractionAmount.toPx() + style.blur.toPx() * 3f).roundToInt()
     val w = size.width.roundToInt() + margin * 2
     val h = size.height.roundToInt() + margin * 2
     if (w <= 0 || h <= 0) return
 
     glassLayer.topLeft = IntOffset(-margin, -margin)
-    glassLayer.renderEffect = effectFor(style, shader, margin, outline)
-    glassLayer.colorFilter = ColorFilter.colorMatrix(vibrancy(style.saturation))
+    if (glassLayer.renderEffect != renderEffect) glassLayer.renderEffect = renderEffect
+    if (glassLayer.colorFilter != vibrancyFilter) glassLayer.colorFilter = vibrancyFilter
     glassLayer.record(size = IntSize(w, h)) {
         translate(
             left = backdrop.origin.x - position.x + margin,

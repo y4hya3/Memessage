@@ -107,23 +107,23 @@ fun MessageBubble(
     val visibleBody = remember(message.body) { com.liquidglass.messages.data.model.MessageText.visible(message.body) }
     val location = remember(visibleBody) { LocationLink.parse(visibleBody) }
     val bodyText = location?.remainingText ?: visibleBody
-    val rtl = TextDirection.isRtl(bodyText)
-    val jumbo = remember(message.body) {
-        val visible = com.liquidglass.messages.data.model.MessageText.visible(message.body)
-        jumboEmojiCount(LocationLink.parse(visible)?.remainingText ?: visible)
-    }
+    val rtl = remember(bodyText) { TextDirection.isRtl(bodyText) }
+    val jumbo = remember(bodyText) { jumboEmojiCount(bodyText) }
 
     // Pop-in only the first time a message is ever shown (ids hoisted by the
     // list so recycled rows scrolled back into view don't re-animate).
+    val alreadyAnimated = remember(message.id) { message.id in animatedIds }
     val appear = remember(message.id) {
-        Animatable(if (message.id in animatedIds) 1f else 0f)
+        Animatable(if (alreadyAnimated) 1f else 0f)
     }
-    LaunchedEffect(message.id) {
-        if (animatedIds.add(message.id)) {
-            appear.animateTo(
-                1f,
-                spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow),
-            )
+    if (!alreadyAnimated) {
+        LaunchedEffect(message.id) {
+            if (animatedIds.add(message.id)) {
+                appear.animateTo(
+                    1f,
+                    spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow),
+                )
+            }
         }
     }
 
@@ -301,8 +301,11 @@ private fun BubbleBody(
 ) {
     val colors = LiquidTheme.colors
     val shape = remember(outgoing, hasTail) { BubbleShape(outgoing, hasTail) }
+    val sentBrush = remember(colors.sentBubbleGradient) {
+        Brush.verticalGradient(colors.sentBubbleGradient)
+    }
     val fill = if (outgoing) {
-        Modifier.background(Brush.verticalGradient(colors.sentBubbleGradient), shape)
+        Modifier.background(sentBrush, shape)
     } else {
         Modifier.background(colors.receivedBubble, shape)
     }

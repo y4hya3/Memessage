@@ -2,11 +2,13 @@ package com.liquidglass.messages
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.getValue
@@ -14,10 +16,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import com.liquidglass.messages.ui.components.IosDialogHost
 import com.liquidglass.messages.ui.navigation.MessagesNavGraph
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.liquidglass.messages.ui.onboarding.SetupScreen
 import com.liquidglass.messages.ui.theme.LiquidMessagesTheme
@@ -95,8 +98,9 @@ class MainActivity : ComponentActivity() {
         installSplashScreen()
         super.onCreate(savedInstanceState)
 
-        // Draw behind the system bars; the theme keeps them transparent.
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Draw behind the system bars across Android 10–15 / MIUI / HyperOS / One UI.
+        enableEdgeToEdge()
+        preferHighestRefreshRate()
 
         refreshGates()
         // Only on a fresh launch: after a rotation the nav state is restored as-is.
@@ -151,13 +155,34 @@ class MainActivity : ComponentActivity() {
         parseDeepLink(intent)
     }
 
-    /** iOS "Keep Messages": drops anything older than the chosen window. */
+    /** Prefers the highest refresh rate at native resolution (unlocks 120Hz on Xiaomi 15). */
+    private fun preferHighestRefreshRate() {
+        runCatching {
+            val currentDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) display else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay
+            } ?: return
+            val currentMode = currentDisplay.mode ?: return
+            val bestMode = currentDisplay.supportedModes
+                .filter { it.physicalWidth == currentMode.physicalWidth && it.physicalHeight == currentMode.physicalHeight }
+                .maxByOrNull { it.refreshRate }
+            if (bestMode != null && bestMode.modeId != currentMode.modeId) {
+                val attrs = window.attributes
+                attrs.preferredDisplayModeId = bestMode.modeId
+                window.attributes = attrs
+            }
+        }
+    }
+
+    /** iOS "Keep Messages": drops anything older than the chosen window on IO after UI settles. */
     private fun pruneOldMessages() {
-        // Recently Deleted keeps things for 30 days, then deletes them for good.
-        lifecycleScope.launch { appContainer.smsRepository.purgeExpired() }
-        val days = appContainer.appSettings.keepMessages.value.days ?: return
-        val cutoff = System.currentTimeMillis() - days * 86_400_000L
-        lifecycleScope.launch { appContainer.smsRepository.deleteOlderThan(cutoff) }
+        lifecycleScope.launch(Dispatchers.IO) {
+            delay(800)
+            appContainer.smsRepository.purgeExpired()
+            val days = appContainer.appSettings.keepMessages.value.days ?: return@launch
+            val cutoff = System.currentTimeMillis() - days * 86_400_000L
+            appContainer.smsRepository.deleteOlderThan(cutoff)
+        }
     }
 
     /** Re-reads the authoritative default-app + permission state into the gates. */

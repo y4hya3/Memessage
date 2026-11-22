@@ -20,10 +20,16 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.unit.sp
+import com.liquidglass.messages.R
 import com.liquidglass.messages.appContainer
 import com.liquidglass.messages.data.model.Conversation
 import com.liquidglass.messages.ui.components.ContactAvatar
@@ -66,6 +72,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -125,6 +132,7 @@ fun ConversationListScreen(
     onConversationClick: (threadId: Long, address: String) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenRecentlyDeleted: () -> Unit = {},
+    selectedThreadId: Long? = null,
     viewModel: ConversationListViewModel = viewModel(factory = ConversationListViewModel.factory()),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -180,6 +188,7 @@ fun ConversationListScreen(
                     IosDialogs.notice(if (on) "Alerts Hidden" else "Alerts On", if (on) IosIcons.BellSlash else IosIcons.Bell)
                 },
                 onToggleRead = { c -> if (c.hasUnread) viewModel.markRead(c.threadId) else viewModel.markUnread(c.threadId) },
+                selectedThreadId = selectedThreadId,
             )
             if (sheet > 0f) {
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.3f * sheet)))
@@ -245,8 +254,10 @@ fun ConversationListContent(
     onTogglePin: (Long) -> Unit = {},
     onToggleMute: (Long) -> Unit = {},
     onToggleRead: (Conversation) -> Unit = {},
+    selectedThreadId: Long? = null,
 ) {
     val colors = LiquidTheme.colors
+    val context = androidx.compose.ui.platform.LocalContext.current
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val listState = rememberLazyListState()
@@ -306,13 +317,16 @@ fun ConversationListContent(
     }
     val unknownUnread = remember(state.conversations) { state.conversations.count { it.contactName == null && !it.isGroup && it.hasUnread } }
 
-    val contextBlur by animateDpAsState(if (contextTarget != null) 20.dp else 0.dp, tween(240), label = "ctxBlur")
+    val canBlurScreen = remember(context) { com.liquidglass.messages.util.DevicePerformance.supportsFullScreenBlur(context) }
+    val contextBlur by animateDpAsState(if (contextTarget != null && canBlurScreen) 20.dp else 0.dp, tween(220), label = "ctxBlur")
 
     Box(Modifier.fillMaxSize().background(colors.listBackground)) {
         Box(Modifier.fillMaxSize().then(if (contextBlur > 0.dp) Modifier.blur(contextBlur) else Modifier)) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .widthIn(max = 720.dp)
                     .fillMaxSize()
                     .backdropSource(backdrop)
                     .background(colors.listBackground),
@@ -356,6 +370,7 @@ fun ConversationListContent(
                         onDelete = { onDeleteThread(conversation.threadId) },
                         muted = conversation.threadId in muted,
                         pinned = conversation.threadId in pinned,
+                        selected = selectedThreadId != null && conversation.threadId == selectedThreadId,
                         onLongPress = { contextTarget = conversation },
                         onTogglePin = { togglePin(conversation, pinned, onTogglePin) },
                         onToggleMute = { onToggleMute(conversation.threadId) },
@@ -398,7 +413,9 @@ fun ConversationListContent(
                     visible = !searching,
                     enter = fadeIn() + slideInVertically { -it },
                     exit = fadeOut() + slideOutVertically { -it },
-                    modifier = Modifier.align(Alignment.TopCenter),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .widthIn(max = 720.dp),
                 ) {
                     Box(
                         modifier = Modifier
@@ -463,6 +480,7 @@ fun ConversationListContent(
                     onCompose = onNewMessage,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
+                        .widthIn(max = 720.dp)
                         .navigationBarsPadding()
                         .imePadding()
                         .padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
@@ -561,6 +579,7 @@ private fun PinnedGrid(
                     Column(
                         modifier = Modifier
                             .weight(1f)
+                            .testTag("pinned_conversation_${c.threadId}")
                             .combinedClickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
@@ -573,6 +592,7 @@ private fun PinnedGrid(
                             .padding(vertical = 8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
+                        val failedDesc = stringResource(R.string.failed_to_send_inbox)
                         Box {
                             ContactAvatar(name = c.displayName, photoUri = c.photoUri, size = size)
                             if (c.hasUnread) {
@@ -584,6 +604,26 @@ private fun PinnedGrid(
                                         .padding(3.dp)
                                         .background(colors.accent, CircleShape),
                                 )
+                            }
+                            if (c.latestMessageFailed) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .size(20.dp)
+                                        .background(colors.listBackground, CircleShape)
+                                        .padding(2.dp)
+                                        .background(colors.destructive, CircleShape)
+                                        .testTag("pinned_failed_icon_${c.threadId}")
+                                        .semantics { contentDescription = failedDesc },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text = "!",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                }
                             }
                         }
                         Spacer(Modifier.height(6.dp))
@@ -597,6 +637,29 @@ private fun PinnedGrid(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.padding(horizontal = 4.dp),
                         )
+                        if (c.latestMessageFailed) {
+                            Text(
+                                text = failedDesc,
+                                style = IosType.caption2,
+                                color = colors.destructive,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 4.dp),
+                            )
+                        } else if (c.hasDraft) {
+                            Text(
+                                text = "${stringResource(R.string.draft_label)} ${c.draftText?.trim()?.replace(Regex("\\s+"), " ").orEmpty()}",
+                                style = IosType.caption2,
+                                color = colors.destructive,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .padding(horizontal = 4.dp)
+                                    .testTag("pinned_draft_indicator_${c.threadId}"),
+                            )
+                        }
                     }
                 }
                 repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }

@@ -70,6 +70,36 @@ private fun ConversationRowReadPreview() {
     }
 }
 
+@Preview(showBackground = true, name = "Row · failed to send")
+@Composable
+private fun ConversationRowFailedPreview() {
+    LiquidMessagesTheme {
+        ConversationRow(
+            conversation = SampleData.readConversation.copy(
+                threadId = 901L,
+                latestMessageFailed = true,
+            ),
+            onClick = {},
+            onDelete = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "Row · draft")
+@Composable
+private fun ConversationRowDraftPreview() {
+    LiquidMessagesTheme {
+        ConversationRow(
+            conversation = SampleData.readConversation.copy(
+                threadId = 902L,
+                draftText = "On my way in 10 minutes",
+            ),
+            onClick = {},
+            onDelete = {},
+        )
+    }
+}
+
 @Preview(showBackground = true, name = "Row · read + unread stack")
 @Composable
 private fun ConversationRowStackPreview() {

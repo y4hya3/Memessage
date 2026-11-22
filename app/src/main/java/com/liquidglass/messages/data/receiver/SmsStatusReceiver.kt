@@ -45,6 +45,10 @@ class SmsStatusReceiver : BroadcastReceiver() {
                     ACTION_SENT -> onSent(context, rowUri, resultCode)
                     ACTION_DELIVERED -> onDelivered(context, rowUri, intent)
                 }
+                runCatching {
+                    (context.applicationContext as? com.liquidglass.messages.MessagesApplication)
+                        ?.container?.smsRepository?.notifyDataChanged()
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to apply SMS status", t)
             } finally {

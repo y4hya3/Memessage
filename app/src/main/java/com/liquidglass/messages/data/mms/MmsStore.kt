@@ -250,7 +250,15 @@ class MmsStore(context: Context) {
                 val existing = out[thread]
                 if (existing == null) {
                     newestIds[thread] = c.getLong(0)
-                    out[thread] = Summary(c.getLong(2) * 1000, "", c.getInt(3) != Telephony.Mms.MESSAGE_BOX_INBOX, if (unread) 1 else 0, 1)
+                    val box = c.getInt(3)
+                    out[thread] = Summary(
+                        dateMillis = c.getLong(2) * 1000,
+                        snippet = "",
+                        outgoing = box != Telephony.Mms.MESSAGE_BOX_INBOX,
+                        unread = if (unread) 1 else 0,
+                        count = 1,
+                        failed = box == Telephony.Mms.MESSAGE_BOX_FAILED,
+                    )
                 } else {
                     out[thread] = existing.copy(unread = existing.unread + if (unread) 1 else 0, count = existing.count + 1)
                 }
@@ -276,7 +284,14 @@ class MmsStore(context: Context) {
         emptyMap()
     }
 
-    data class Summary(val dateMillis: Long, val snippet: String, val outgoing: Boolean, val unread: Int, val count: Int)
+    data class Summary(
+        val dateMillis: Long,
+        val snippet: String,
+        val outgoing: Boolean,
+        val unread: Int,
+        val count: Int,
+        val failed: Boolean = false,
+    )
 
     /** Raw part data for re-sending a failed MMS. */
     fun readRawParts(mmsId: Long): List<MmsPdu.Part> = try {
